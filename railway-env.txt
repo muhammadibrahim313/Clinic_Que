@@ -1,0 +1,16 @@
+# Railway Environment Variables
+# Add these in Railway Dashboard → Project Settings → Variables
+
+# Database (Railway provides automatically when you add PostgreSQL service)
+DATABASE_URL=postgresql://user:password@host:port/database
+
+# Redis (Add when you add Redis service to Railway project) 
+REDIS_URL=rediss://default:password@host:port
+
+# Admin Configuration (Set your own secure password)
+ADMIN_PASS=your_secure_admin_password_here
+
+# Optional: Twilio Configuration (for SMS/WhatsApp integration)
+TWILIO_ACCOUNT_SID=your_twilio_account_sid
+TWILIO_AUTH_TOKEN=your_twilio_auth_token  
+TWILIO_PHONE_NUMBER=+1234567890
