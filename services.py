@@ -47,11 +47,16 @@ def get_redis():
 
 def get_connection():
     """Return a PostgreSQL connection with RealDictCursor."""
-    conn = psycopg2.connect(
-        DATABASE_URL,
-        cursor_factory=psycopg2.extras.RealDictCursor
-    )
-    return conn
+    try:
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            cursor_factory=psycopg2.extras.RealDictCursor
+        )
+        return conn
+    except Exception as e:
+        print(f"❌ PostgreSQL connection failed: {e}")
+        print(f"🔗 DATABASE_URL: {DATABASE_URL[:50]}...")
+        raise
 
 
 def init_db(conn) -> None:

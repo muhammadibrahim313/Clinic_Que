@@ -368,22 +368,68 @@ if os.path.isdir(static_dir):
 # Server startup for Railway deployment
 if __name__ == "__main__":
     import uvicorn
+    import sys
+    import traceback
+    import logging
     
-    # Ensure DATABASE_URL is set to Neon database
-    if not os.getenv("DATABASE_URL"):
-        os.environ["DATABASE_URL"] = "postgresql://checking_owner:npg_MdnKY0Gh1amc@ep-super-scene-a51ij7h2-pooler.us-east-2.aws.neon.tech/checking?sslmode=require&channel_binding=require"
+    # Configure detailed logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger = logging.getLogger(__name__)
     
-    port = int(os.getenv("PORT", 8000))
-    print(f"🚀 Starting server on port {port}")
-    print(f"🗄️ Using database: {os.getenv('DATABASE_URL')[:50]}...")
-    
-    # Initialize database
     try:
-        conn = get_connection()
-        init_db(conn)
-        conn.close()
-        print("✅ Database initialized successfully")
+        logger.info("🚀 Starting Clinic Queue with PostgreSQL...")
+        logger.info(f"🐍 Python version: {sys.version}")
+        logger.info(f"📁 Working directory: {os.getcwd()}")
+        
+        # Ensure DATABASE_URL is set to Neon database
+        if not os.getenv("DATABASE_URL"):
+            os.environ["DATABASE_URL"] = "postgresql://checking_owner:npg_MdnKY0Gh1amc@ep-super-scene-a51ij7h2-pooler.us-east-2.aws.neon.tech/checking?sslmode=require&channel_binding=require"
+        
+        logger.info(f"🗄️ Using database: {os.getenv('DATABASE_URL')[:50]}...")
+        
+        # Test psycopg2 import
+        try:
+            import psycopg2
+            logger.info("✅ psycopg2 import successful")
+        except ImportError as e:
+            logger.error(f"❌ psycopg2 import failed: {e}")
+            raise
+        
+        # Test database connection
+        logger.info("🔗 Testing database connection...")
+        try:
+            conn = get_connection()
+            logger.info("✅ Database connection successful")
+            
+            # Test basic query
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                result = cur.fetchone()
+                logger.info(f"✅ Database query test: {result}")
+            
+            # Initialize database
+            logger.info("🏗️ Initializing database tables...")
+            init_db(conn)
+            logger.info("✅ Database tables initialized")
+            
+            conn.close()
+            logger.info("✅ Database connection closed")
+            
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            # Don't crash - continue without database for now
+        
+        port = int(os.getenv("PORT", 8000))
+        logger.info(f"🌐 Starting uvicorn on port {port}")
+        
+        uvicorn.run(app, host="0.0.0.0", port=port)
+        
     except Exception as e:
-        print(f"⚠️ Database initialization warning: {e}")
-    
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        logger.error(f"❌ CRITICAL STARTUP ERROR: {e}")
+        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+        sys.exit(1)
