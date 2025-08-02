@@ -142,6 +142,10 @@ async def whatsapp_inbound(request: Request) -> str:
 
         if command == "join":
             try:
+                # Check if database is available
+                if os.getenv("DATABASE_AVAILABLE") != "true":
+                    return "Service is temporarily in maintenance mode. Please try again in a few minutes."
+                    
                 conn_local = get_connection()
                 ticket = create_ticket(conn_local, phone=from_num, note=arg, channel="whatsapp")
                 conn_local.close()
@@ -152,6 +156,10 @@ async def whatsapp_inbound(request: Request) -> str:
                 
         elif command == "status":
             try:
+                # Check if database is available
+                if os.getenv("DATABASE_AVAILABLE") != "true":
+                    return "Service is temporarily in maintenance mode. Please try again in a few minutes."
+                    
                 conn_local = get_connection()
                 ticket = get_ticket_by_phone(conn_local, from_num)
                 conn_local.close()
@@ -164,6 +172,10 @@ async def whatsapp_inbound(request: Request) -> str:
                 
         elif command == "leave":
             try:
+                # Check if database is available
+                if os.getenv("DATABASE_AVAILABLE") != "true":
+                    return "Service is temporarily in maintenance mode. Please try again in a few minutes."
+                    
                 conn_local = get_connection()
                 ticket = get_ticket_by_phone(conn_local, from_num)
                 if not ticket:
@@ -198,6 +210,64 @@ async def whatsapp_status(request: Request) -> str:
     return "OK"
 
 
+@app.get("/debug/railway")
+def debug_railway():
+    """Debug endpoint to check Railway environment and database connection."""
+    import sys
+    debug_info = {
+        "app_status": "running",
+        "python_version": sys.version,
+        "working_directory": os.getcwd(),
+        "port": os.getenv("PORT", "not_set"),
+        "database_available": os.getenv("DATABASE_AVAILABLE", "unknown"),
+        "environment_vars": {
+            "DATABASE_URL": "SET" if os.getenv("DATABASE_URL") else "NOT_SET",
+            "REDIS_URL": "SET" if os.getenv("REDIS_URL") else "NOT_SET",
+        }
+    }
+    
+    # Test database connection
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 as test")
+            result = cur.fetchone()
+        conn.close()
+        debug_info["database_test"] = "SUCCESS"
+        debug_info["database_result"] = str(result)
+    except Exception as e:
+        debug_info["database_test"] = "FAILED"
+        debug_info["database_error"] = str(e)
+    
+    # Test psycopg2
+    try:
+        import psycopg2
+        debug_info["psycopg2"] = "available"
+        debug_info["psycopg2_version"] = psycopg2.__version__
+    except ImportError as e:
+        debug_info["psycopg2"] = "missing"
+        debug_info["psycopg2_error"] = str(e)
+    
+    return debug_info
+
+
+@app.post("/webhooks/whatsapp/test", response_class=PlainTextResponse)
+async def whatsapp_test(request: Request) -> str:
+    """Test WhatsApp webhook without database operations."""
+    try:
+        import urllib.parse
+        
+        body_bytes = await request.body()
+        parsed = urllib.parse.parse_qs(body_bytes.decode('utf-8', errors='ignore'))
+        from_num = parsed.get('From', [''])[0]
+        text = parsed.get('Body', [''])[0]
+        
+        return f"Test successful! From: {from_num}, Text: {text}, DB Available: {os.getenv('DATABASE_AVAILABLE', 'unknown')}"
+        
+    except Exception as e:
+        return f"Test failed: {str(e)}"
+
+
 @app.get("/admin/board")
 def admin_board(passcode: str) -> Dict[str, Any]:
     """Return the current board state.
@@ -209,15 +279,35 @@ def admin_board(passcode: str) -> Dict[str, Any]:
     immediately after reading the board.  This avoids reliance on a global
     connection that may be unavailable in multi‑threaded or test contexts.
     """
-    conn_local = get_connection()
+    # Check if database is available
+    if os.getenv("DATABASE_AVAILABLE") != "true":
+        return {
+            "error": "Database unavailable",
+            "message": "System is in maintenance mode",
+            "waiting": [],
+            "recent": [],
+            "stats": {"waiting_count": 0, "avg_wait": 0}
+        }
+    
     try:
-        settings = get_settings(conn_local)
-        if passcode != settings["admin_passcode"]:
-            raise HTTPException(status_code=401, detail="Invalid passcode")
-        board = get_board(conn_local)
-        return board
-    finally:
-        conn_local.close()
+        conn_local = get_connection()
+        try:
+            settings = get_settings(conn_local)
+            if passcode != settings["admin_passcode"]:
+                raise HTTPException(status_code=401, detail="Invalid passcode")
+            board = get_board(conn_local)
+            return board
+        finally:
+            conn_local.close()
+    except Exception as e:
+        print(f"Admin board database error: {e}")
+        return {
+            "error": "Database error",
+            "message": str(e),
+            "waiting": [],
+            "recent": [],
+            "stats": {"waiting_count": 0, "avg_wait": 0}
+        }
 
 
 @app.post("/admin/action")
@@ -401,13 +491,14 @@ if __name__ == "__main__":
         
         # Test database connection
         logger.info("🔗 Testing database connection...")
+        database_available = False
         try:
             conn = get_connection()
             logger.info("✅ Database connection successful")
             
             # Test basic query
             with conn.cursor() as cur:
-                cur.execute("SELECT 1")
+                cur.execute("SELECT 1 as test")
                 result = cur.fetchone()
                 logger.info(f"✅ Database query test: {result}")
             
@@ -418,11 +509,16 @@ if __name__ == "__main__":
             
             conn.close()
             logger.info("✅ Database connection closed")
+            database_available = True
             
         except Exception as e:
             logger.error(f"❌ Database connection failed: {e}")
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            # Don't crash - continue without database for now
+            logger.warning("⚠️ Continuing without database - app will run in limited mode")
+            
+        # Set global database availability flag
+        os.environ["DATABASE_AVAILABLE"] = "true" if database_available else "false"
+        logger.info(f"🗄️ Database available: {database_available}")
         
         port = int(os.getenv("PORT", 8000))
         logger.info(f"🌐 Starting uvicorn on port {port}")
