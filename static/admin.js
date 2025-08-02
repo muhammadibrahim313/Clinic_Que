@@ -29,8 +29,32 @@ function AdminBoard() {
 
   React.useEffect(() => {
     if (isLoggedIn && passcode) {
-      const id = setInterval(fetchBoard, 5000);
-      return () => clearInterval(id);
+      // Try to use Server-Sent Events for real-time updates
+      const eventSource = new EventSource(`/admin/events?passcode=${encodeURIComponent(passcode)}`);
+      
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'board_update' && data.data) {
+            setBoard(data.data);
+            setError(null);
+          }
+        } catch (err) {
+          console.error('SSE parse error:', err);
+        }
+      };
+      
+      eventSource.onerror = (err) => {
+        console.error('SSE error:', err);
+        eventSource.close();
+        // Fallback to polling
+        const id = setInterval(fetchBoard, 5000);
+        return () => clearInterval(id);
+      };
+      
+      return () => {
+        eventSource.close();
+      };
     }
   }, [passcode, isLoggedIn]);
 

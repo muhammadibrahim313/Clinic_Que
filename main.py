@@ -13,8 +13,10 @@ import os
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import asyncio
+import json
 import sqlite3
 from typing import Any, Dict
 from services import (
@@ -27,6 +29,8 @@ from services import (
     update_ticket_status,
     get_board,
     get_ticket_by_phone,
+    check_rate_limit,
+    get_redis,
 )
 from schemas import ActionRequest
 
@@ -71,6 +75,10 @@ async def sms_inbound(request: Request) -> str:
     parts = body.split(maxsplit=1)
     command = parts[0] if parts else ""
     arg = parts[1] if len(parts) > 1 else None
+
+    # Rate limiting check
+    if not check_rate_limit(from_num, "sms", limit=10, window=300):  # 10 messages per 5 minutes
+        return "Too many requests. Please wait a few minutes before trying again."
 
     if command == "join":
         conn_local = get_connection()
@@ -122,6 +130,10 @@ async def whatsapp_inbound(request: Request) -> str:
     parts = body.split(maxsplit=1)
     command = parts[0] if parts else ""
     arg = parts[1] if len(parts) > 1 else None
+
+    # Rate limiting check
+    if not check_rate_limit(from_num, "whatsapp", limit=10, window=300):  # 10 messages per 5 minutes
+        return "Too many requests. Please wait a few minutes before trying again."
 
     if command == "join":
         conn_local = get_connection()
@@ -265,6 +277,63 @@ async def kiosk_join(request: Request) -> str:
         return f"Your ticket is {ticket['code']}. You are #{ticket['position']}. ETA {ticket['eta_minutes']} min. Please stay nearby."
     finally:
         conn_local.close()
+
+
+@app.get("/admin/events")
+async def admin_events(passcode: str):
+    """Server-Sent Events endpoint for real-time admin board updates."""
+    conn_local = get_connection()
+    try:
+        settings = get_settings(conn_local)
+        if passcode != settings["admin_passcode"]:
+            raise HTTPException(status_code=401, detail="Invalid passcode")
+    finally:
+        conn_local.close()
+    
+    async def event_stream():
+        redis_client = get_redis()
+        if not redis_client:
+            # Fallback: just send periodic board updates
+            while True:
+                try:
+                    conn_local = get_connection()
+                    board = get_board(conn_local, use_cache=False)
+                    conn_local.close()
+                    yield f"data: {json.dumps({'type': 'board_update', 'data': {'tickets': board}})}\n\n"
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                    await asyncio.sleep(5)
+        else:
+            # Use Redis pub/sub for real-time updates
+            pubsub = redis_client.pubsub()
+            pubsub.subscribe("clinic:updates")
+            
+            try:
+                while True:
+                    try:
+                        message = pubsub.get_message(timeout=5.0)
+                        if message and message['type'] == 'message':
+                            yield f"data: {message['data']}\n\n"
+                        else:
+                            # Send heartbeat
+                            yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                        await asyncio.sleep(1)
+            finally:
+                pubsub.close()
+    
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
 
 
 # Mount static files (admin board script)

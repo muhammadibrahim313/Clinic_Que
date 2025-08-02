@@ -9,8 +9,15 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 
 # Determine the path to the SQLite file.  If DATABASE_URL is provided and
@@ -20,6 +27,27 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_FILENAME = os.path.join(PROJECT_DIR, "queue.db")
 
 DB_PATH = os.getenv("DATABASE_URL", DEFAULT_DB_FILENAME)
+REDIS_URL = os.getenv("REDIS_URL")
+
+# Redis connection
+_redis_client = None
+
+def get_redis() -> Optional[redis.Redis]:
+    """Get Redis client if available and configured."""
+    global _redis_client
+    if not REDIS_AVAILABLE or not REDIS_URL:
+        return None
+    
+    if _redis_client is None:
+        try:
+            _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+            # Test connection
+            _redis_client.ping()
+        except Exception as e:
+            print(f"Redis connection failed: {e}")
+            _redis_client = None
+    
+    return _redis_client
 
 
 def get_connection() -> sqlite3.Connection:
@@ -72,9 +100,26 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def get_settings(conn: sqlite3.Connection) -> sqlite3.Row:
+def get_settings(conn: sqlite3.Connection, use_cache: bool = True) -> sqlite3.Row:
+    # Try cache first
+    if use_cache:
+        cached_settings = get_cached_settings()
+        if cached_settings:
+            # Convert dict back to sqlite3.Row-like object
+            class RowDict(dict):
+                def __getitem__(self, key):
+                    return super().__getitem__(key)
+            return RowDict(cached_settings)
+    
+    # Get from database
     cur = conn.execute("SELECT * FROM settings WHERE id = 1")
-    return cur.fetchone()
+    settings_row = cur.fetchone()
+    
+    # Cache the settings
+    if settings_row:
+        cache_settings(dict(settings_row))
+    
+    return settings_row
 
 
 def set_admin_pass(conn: sqlite3.Connection, passcode: str) -> None:
@@ -155,7 +200,14 @@ def update_ticket_status(conn: sqlite3.Connection, code: str, new_status: str) -
     return cur2.fetchone()
 
 
-def get_board(conn: sqlite3.Connection) -> Dict[str, List[Dict[str, Any]]]:
+def get_board(conn: sqlite3.Connection, use_cache: bool = True) -> Dict[str, List[Dict[str, Any]]]:
+    # Try cache first
+    if use_cache:
+        cached_board = get_cached_board()
+        if cached_board:
+            return cached_board
+    
+    # Build from database
     statuses = ["waiting", "next", "in_room", "done", "no_show", "urgent"]
     board: Dict[str, List[Dict[str, Any]]] = {s: [] for s in statuses}
     cur = conn.execute("SELECT * FROM tickets ORDER BY datetime(created_at)")
@@ -172,6 +224,11 @@ def get_board(conn: sqlite3.Connection) -> Dict[str, List[Dict[str, Any]]]:
         if s not in board:
             board[s] = []
         board[s].append(ticket_dict)
+    
+    # Cache and publish update
+    cache_board_data({"tickets": board})
+    publish_board_update({"tickets": board})
+    
     return board
 
 
@@ -181,3 +238,91 @@ def get_ticket_by_phone(conn: sqlite3.Connection, phone: str) -> Optional[sqlite
         (phone,),
     )
     return cur.fetchone()
+
+
+# ===== REDIS HELPER FUNCTIONS =====
+
+def cache_board_data(board_data: Dict[str, Any]) -> None:
+    """Cache board data in Redis with 30 second TTL."""
+    redis_client = get_redis()
+    if redis_client:
+        try:
+            redis_client.setex("clinic:board", 30, json.dumps(board_data))
+        except Exception as e:
+            print(f"Redis cache error: {e}")
+
+
+def get_cached_board() -> Optional[Dict[str, Any]]:
+    """Get cached board data from Redis."""
+    redis_client = get_redis()
+    if redis_client:
+        try:
+            cached = redis_client.get("clinic:board")
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            print(f"Redis get error: {e}")
+    return None
+
+
+def publish_board_update(board_data: Dict[str, Any]) -> None:
+    """Publish board update to Redis channel for real-time updates."""
+    redis_client = get_redis()
+    if redis_client:
+        try:
+            redis_client.publish("clinic:updates", json.dumps({
+                "type": "board_update",
+                "data": board_data,
+                "timestamp": datetime.utcnow().isoformat()
+            }))
+        except Exception as e:
+            print(f"Redis publish error: {e}")
+
+
+def check_rate_limit(phone: str, action: str = "sms", limit: int = 5, window: int = 300) -> bool:
+    """Check if phone number is rate limited. Returns True if allowed, False if rate limited."""
+    redis_client = get_redis()
+    if not redis_client:
+        return True  # Allow if Redis unavailable
+    
+    try:
+        key = f"rate_limit:{action}:{phone}"
+        current = redis_client.get(key)
+        
+        if current is None:
+            # First request - set counter
+            redis_client.setex(key, window, 1)
+            return True
+        elif int(current) < limit:
+            # Under limit - increment
+            redis_client.incr(key)
+            return True
+        else:
+            # Over limit
+            return False
+    except Exception as e:
+        print(f"Redis rate limit error: {e}")
+        return True  # Allow if error
+
+
+def cache_settings(settings_data: Dict[str, Any]) -> None:
+    """Cache settings in Redis with 5 minute TTL."""
+    redis_client = get_redis()
+    if redis_client:
+        try:
+            redis_client.setex("clinic:settings", 300, json.dumps(dict(settings_data)))
+        except Exception as e:
+            print(f"Redis cache settings error: {e}")
+
+
+def get_cached_settings() -> Optional[Dict[str, Any]]:
+    """Get cached settings from Redis."""
+    redis_client = get_redis()
+    if redis_client:
+        try:
+            cached = redis_client.get("clinic:settings")
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            print(f"Redis get settings error: {e}")
+    return None
