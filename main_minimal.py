@@ -24,6 +24,7 @@ logger.info("🚀 Starting Clinic Queue Minimal App...")
 logger.info(f"🐍 Python version: {sys.version}")
 logger.info(f"📁 Working directory: {os.getcwd()}")
 logger.info(f"🌐 PORT environment variable: {os.getenv('PORT', 'NOT_SET')}")
+logger.info("🕐 Deployment timestamp: 2025-08-02 19:08 UTC")
 
 try:
     app = FastAPI(title="Clinic Queue - Minimal")
