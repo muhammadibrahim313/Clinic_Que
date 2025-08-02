@@ -107,10 +107,54 @@ def health_check():
             "status": "healthy",
             "database": "connected",
             "redis": redis_status,
-            "clinic_name": settings.get("clinic_name", "Clinic Queue")
+            "clinic_name": settings.get("clinic_name", "Clinic Queue"),
+            "admin_passcode_set": bool(settings.get("admin_passcode"))
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
+
+
+@app.post("/webhooks/whatsapp/debug", response_class=PlainTextResponse)
+async def debug_whatsapp_webhook(request: Request) -> str:
+    """Debug webhook for troubleshooting 502 errors."""
+    import json
+    
+    try:
+        # Get basic request info
+        debug_info = {
+            "method": request.method,
+            "url": str(request.url),
+            "client": request.client.host if request.client else "unknown"
+        }
+        
+        # Try to read and parse body
+        body_bytes = await request.body()
+        debug_info["body_size"] = len(body_bytes)
+        
+        import urllib.parse
+        parsed = urllib.parse.parse_qs(body_bytes.decode('utf-8', errors='ignore'))
+        debug_info["twilio_data"] = {
+            "From": parsed.get('From', ['NOT_FOUND'])[0],
+            "Body": parsed.get('Body', ['NOT_FOUND'])[0],
+            "To": parsed.get('To', ['NOT_FOUND'])[0]
+        }
+        
+        # Test database
+        conn = get_connection()
+        settings = get_settings(conn, use_cache=False)
+        conn.close()
+        debug_info["database"] = "working"
+        debug_info["admin_passcode"] = settings.get("admin_passcode", "NOT_SET")
+        
+        # Test Redis
+        redis_client = get_redis()
+        debug_info["redis"] = "connected" if redis_client else "not_configured"
+        
+        return f"DEBUG_SUCCESS: {json.dumps(debug_info, indent=2)}"
+        
+    except Exception as e:
+        import traceback
+        return f"DEBUG_ERROR: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
 
 
 @app.post("/webhooks/sms/twilio", response_class=PlainTextResponse)
@@ -167,54 +211,96 @@ async def sms_inbound(request: Request) -> str:
 
 @app.post("/webhooks/whatsapp", response_class=PlainTextResponse)
 async def whatsapp_inbound(request: Request) -> str:
-    """Handle incoming WhatsApp messages from Twilio."""
+    """Handle incoming WhatsApp messages from Twilio - Robust version."""
     import urllib.parse
+    import logging
+    import traceback
     
-    # Twilio posts form-encoded data for WhatsApp too
-    body_bytes = await request.body()
-    parsed = urllib.parse.parse_qs(body_bytes.decode())
-    from_num = parsed.get('From', [''])[0]
-    text = parsed.get('Body', [''])[0]
-    body = (text or "").strip().lower()
-    parts = body.split(maxsplit=1)
-    command = parts[0] if parts else ""
-    arg = parts[1] if len(parts) > 1 else None
-
-    # Rate limiting check
-    if not check_rate_limit(from_num, "whatsapp", limit=10, window=300):
-        return "Too many requests. Please wait a few minutes before trying again."
-
-    if command == "join":
-        conn_local = get_connection()
-        ticket = create_ticket(conn_local, phone=from_num, note=arg, channel="whatsapp")
-        conn_local.close()
-        return f"Your ticket is {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min. Reply STATUS anytime."
-    elif command == "status":
-        conn_local = get_connection()
-        ticket = get_ticket_by_phone(conn_local, from_num)
-        conn_local.close()
-        if not ticket:
-            return "No active ticket. Reply JOIN to enter the queue."
-        return f"Ticket {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min."
-    elif command == "leave":
-        conn_local = get_connection()
-        ticket = get_ticket_by_phone(conn_local, from_num)
-        if not ticket:
-            conn_local.close()
-            return "No active ticket. Reply JOIN to enter the queue."
-        update_ticket_status(conn_local, ticket['code'], 'canceled')
-        conn_local.close()
-        return f"Ticket {ticket['code']} canceled. Thank you."
-    elif command == "help":
-        return (
-            "Commands:\n"
-            "JOIN [note] – join the queue with an optional note (e.g., fever).\n"
-            "STATUS – check your current position and ETA.\n"
-            "LEAVE – cancel your ticket.\n"
-            "HELP – show this message."
-        )
-    else:
-        return "Unknown command. Send HELP for usage."
+    # Set up logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Step 1: Parse request safely
+        try:
+            body_bytes = await request.body()
+            parsed = urllib.parse.parse_qs(body_bytes.decode('utf-8', errors='ignore'))
+            from_num = parsed.get('From', [''])[0]
+            text = parsed.get('Body', [''])[0]
+            
+            logger.info(f"WhatsApp message from {from_num}: {text}")
+            
+        except Exception as e:
+            logger.error(f"Request parsing error: {e}")
+            return "Error processing your message. Please try again."
+        
+        # Step 2: Process command safely
+        try:
+            body = (text or "").strip().lower()
+            parts = body.split(maxsplit=1)
+            command = parts[0] if parts else ""
+            arg = parts[1] if len(parts) > 1 else None
+            
+        except Exception as e:
+            logger.error(f"Command parsing error: {e}")
+            return "Error processing your command. Send HELP for usage."
+        
+        # Step 3: Rate limiting (safe)
+        try:
+            if not check_rate_limit(from_num, "whatsapp", limit=10, window=300):
+                return "Too many requests. Please wait a few minutes before trying again."
+        except Exception as e:
+            logger.error(f"Rate limiting error: {e}")
+            # Continue without rate limiting if it fails
+        
+        # Step 4: Database operations (safe)
+        try:
+            if command == "join":
+                conn_local = get_connection()
+                ticket = create_ticket(conn_local, phone=from_num, note=arg, channel="whatsapp")
+                conn_local.close()
+                return f"Your ticket is {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min. Reply STATUS anytime."
+                
+            elif command == "status":
+                conn_local = get_connection()
+                ticket = get_ticket_by_phone(conn_local, from_num)
+                conn_local.close()
+                if not ticket:
+                    return "No active ticket. Reply JOIN to enter the queue."
+                return f"Ticket {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min."
+                
+            elif command == "leave":
+                conn_local = get_connection()
+                ticket = get_ticket_by_phone(conn_local, from_num)
+                if not ticket:
+                    conn_local.close()
+                    return "No active ticket. Reply JOIN to enter the queue."
+                update_ticket_status(conn_local, ticket['code'], 'canceled')
+                conn_local.close()
+                return f"Ticket {ticket['code']} canceled. Thank you."
+                
+            elif command == "help":
+                return (
+                    "Commands:\n"
+                    "JOIN [note] – join the queue with an optional note (e.g., fever).\n"
+                    "STATUS – check your current position and ETA.\n"
+                    "LEAVE – cancel your ticket.\n"
+                    "HELP – show this message."
+                )
+            else:
+                return (
+                    "Unknown command. Send HELP for usage.\n\n"
+                    "Available commands: JOIN, STATUS, LEAVE, HELP"
+                )
+                
+        except Exception as e:
+            logger.error(f"Database operation error: {e}")
+            logger.error(traceback.format_exc())
+            return "Service temporarily unavailable. Please try again in a few minutes or contact reception."
+    
+    except Exception as e:
+        logger.error(f"Critical webhook error: {e}")
+        logger.error(traceback.format_exc())
+        return "Service error. Please try again later."
 
 
 @app.post("/webhooks/whatsapp/status", response_class=PlainTextResponse)
