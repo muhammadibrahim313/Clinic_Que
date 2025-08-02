@@ -368,6 +368,22 @@ if os.path.isdir(static_dir):
 # Server startup for Railway deployment
 if __name__ == "__main__":
     import uvicorn
+    
+    # Ensure DATABASE_URL is set to Neon database
+    if not os.getenv("DATABASE_URL"):
+        os.environ["DATABASE_URL"] = "postgresql://checking_owner:npg_MdnKY0Gh1amc@ep-super-scene-a51ij7h2-pooler.us-east-2.aws.neon.tech/checking?sslmode=require&channel_binding=require"
+    
     port = int(os.getenv("PORT", 8000))
     print(f"🚀 Starting server on port {port}")
+    print(f"🗄️ Using database: {os.getenv('DATABASE_URL')[:50]}...")
+    
+    # Initialize database
+    try:
+        conn = get_connection()
+        init_db(conn)
+        conn.close()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"⚠️ Database initialization warning: {e}")
+    
     uvicorn.run(app, host="0.0.0.0", port=port)
