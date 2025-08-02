@@ -54,9 +54,12 @@ def get_connection() -> sqlite3.Connection:
     """Return a SQLite connection.  Ensures foreign keys are enabled."""
     # If a full URL is provided (e.g., postgresql), ignore and fallback to SQLite.
     if DB_PATH.startswith("postgres"):
-        # Postgres not supported in this fallback.
-        raise RuntimeError("PostgreSQL is not supported in this environment")
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        # Postgres not supported in this fallback - use local SQLite instead
+        print(f"PostgreSQL URL detected but not supported, falling back to local SQLite: {DEFAULT_DB_FILENAME}")
+        conn = sqlite3.connect(DEFAULT_DB_FILENAME, check_same_thread=False)
+    else:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

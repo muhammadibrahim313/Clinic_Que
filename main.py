@@ -119,53 +119,77 @@ async def whatsapp_inbound(request: Request) -> str:
     
     Uses the same command logic as SMS but for WhatsApp.
     """
-    import urllib.parse
-    
-    # Twilio posts form-encoded data for WhatsApp too
-    body_bytes = await request.body()
-    parsed = urllib.parse.parse_qs(body_bytes.decode())
-    from_num = parsed.get('From', [''])[0]
-    text = parsed.get('Body', [''])[0]
-    body = (text or "").strip().lower()
-    parts = body.split(maxsplit=1)
-    command = parts[0] if parts else ""
-    arg = parts[1] if len(parts) > 1 else None
+    try:
+        import urllib.parse
+        
+        # Twilio posts form-encoded data for WhatsApp too
+        body_bytes = await request.body()
+        parsed = urllib.parse.parse_qs(body_bytes.decode('utf-8', errors='ignore'))
+        from_num = parsed.get('From', [''])[0]
+        text = parsed.get('Body', [''])[0]
+        body = (text or "").strip().lower()
+        parts = body.split(maxsplit=1)
+        command = parts[0] if parts else ""
+        arg = parts[1] if len(parts) > 1 else None
 
-    # Rate limiting check
-    if not check_rate_limit(from_num, "whatsapp", limit=10, window=300):  # 10 messages per 5 minutes
-        return "Too many requests. Please wait a few minutes before trying again."
+        # Rate limiting check (safe - returns True if Redis fails)
+        try:
+            if not check_rate_limit(from_num, "whatsapp", limit=10, window=300):
+                return "Too many requests. Please wait a few minutes before trying again."
+        except Exception as e:
+            print(f"Rate limit check failed: {e}")
+            # Continue without rate limiting
 
-    if command == "join":
-        conn_local = get_connection()
-        ticket = create_ticket(conn_local, phone=from_num, note=arg, channel="whatsapp")
-        conn_local.close()
-        return f"Your ticket is {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min. Reply STATUS anytime."
-    elif command == "status":
-        conn_local = get_connection()
-        ticket = get_ticket_by_phone(conn_local, from_num)
-        conn_local.close()
-        if not ticket:
-            return "No active ticket. Reply JOIN to enter the queue."
-        return f"Ticket {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min."
-    elif command == "leave":
-        conn_local = get_connection()
-        ticket = get_ticket_by_phone(conn_local, from_num)
-        if not ticket:
-            conn_local.close()
-            return "No active ticket. Reply JOIN to enter the queue."
-        update_ticket_status(conn_local, ticket['code'], 'canceled')
-        conn_local.close()
-        return f"Ticket {ticket['code']} canceled. Thank you."
-    elif command == "help":
-        return (
-            "Commands:\n"
-            "JOIN [note] – join the queue with an optional note (e.g., fever).\n"
-            "STATUS – check your current position and ETA.\n"
-            "LEAVE – cancel your ticket.\n"
-            "HELP – show this message."
-        )
-    else:
-        return "Unknown command. Send HELP for usage."
+        if command == "join":
+            try:
+                conn_local = get_connection()
+                ticket = create_ticket(conn_local, phone=from_num, note=arg, channel="whatsapp")
+                conn_local.close()
+                return f"Your ticket is {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min. Reply STATUS anytime."
+            except Exception as e:
+                print(f"Database error during JOIN: {e}")
+                return "Service temporarily unavailable. Please try again later."
+                
+        elif command == "status":
+            try:
+                conn_local = get_connection()
+                ticket = get_ticket_by_phone(conn_local, from_num)
+                conn_local.close()
+                if not ticket:
+                    return "No active ticket. Reply JOIN to enter the queue."
+                return f"Ticket {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min."
+            except Exception as e:
+                print(f"Database error during STATUS: {e}")
+                return "Service temporarily unavailable. Please try again later."
+                
+        elif command == "leave":
+            try:
+                conn_local = get_connection()
+                ticket = get_ticket_by_phone(conn_local, from_num)
+                if not ticket:
+                    conn_local.close()
+                    return "No active ticket. Reply JOIN to enter the queue."
+                update_ticket_status(conn_local, ticket['code'], 'canceled')
+                conn_local.close()
+                return f"Ticket {ticket['code']} canceled. Thank you."
+            except Exception as e:
+                print(f"Database error during LEAVE: {e}")
+                return "Service temporarily unavailable. Please try again later."
+                
+        elif command == "help":
+            return (
+                "Commands:\n"
+                "JOIN [note] – join the queue with an optional note (e.g., fever).\n"
+                "STATUS – check your current position and ETA.\n"
+                "LEAVE – cancel your ticket.\n"
+                "HELP – show this message."
+            )
+        else:
+            return "Unknown command. Send HELP for usage."
+            
+    except Exception as e:
+        print(f"WhatsApp webhook global error: {e}")
+        return "Service temporarily unavailable. Please try again later."
 
 
 @app.post("/webhooks/whatsapp/status", response_class=PlainTextResponse)
