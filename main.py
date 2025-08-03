@@ -278,6 +278,7 @@ async def handle_whatsapp_join(from_num: str, note: str = None) -> str:
 
 async def handle_whatsapp_status(from_num: str) -> str:
     """Enhanced status check with progress indicators."""
+        
     conn_local = get_connection()
     try:
         ticket = get_ticket_by_phone(conn_local, from_num)

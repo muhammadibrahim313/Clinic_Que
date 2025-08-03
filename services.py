@@ -105,10 +105,12 @@ def get_settings(conn: sqlite3.Connection, use_cache: bool = True) -> sqlite3.Ro
     if use_cache:
         cached_settings = get_cached_settings()
         if cached_settings:
-            # Convert dict back to sqlite3.Row-like object
+            # Convert dict back to sqlite3.Row-like object with get method
             class RowDict(dict):
                 def __getitem__(self, key):
                     return super().__getitem__(key)
+                def get(self, key, default=None):
+                    return super().get(key, default)
             return RowDict(cached_settings)
     
     # Get from database
@@ -118,6 +120,15 @@ def get_settings(conn: sqlite3.Connection, use_cache: bool = True) -> sqlite3.Ro
     # Cache the settings
     if settings_row:
         cache_settings(dict(settings_row))
+    
+    # Convert sqlite3.Row to dict-like object with get method
+    if settings_row:
+        class RowDict(dict):
+            def __getitem__(self, key):
+                return super().__getitem__(key)
+            def get(self, key, default=None):
+                return super().get(key, default)
+        return RowDict(dict(settings_row))
     
     return settings_row
 
