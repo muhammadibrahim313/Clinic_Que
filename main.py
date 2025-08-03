@@ -119,153 +119,59 @@ async def whatsapp_inbound(request: Request) -> str:
     
     Uses the same command logic as SMS but for WhatsApp.
     """
-    try:
-        import urllib.parse
-        
-        # Twilio posts form-encoded data for WhatsApp too
-        body_bytes = await request.body()
-        parsed = urllib.parse.parse_qs(body_bytes.decode('utf-8', errors='ignore'))
-        from_num = parsed.get('From', [''])[0]
-        text = parsed.get('Body', [''])[0]
-        body = (text or "").strip().lower()
-        parts = body.split(maxsplit=1)
-        command = parts[0] if parts else ""
-        arg = parts[1] if len(parts) > 1 else None
+    import urllib.parse
+    
+    # Twilio posts form-encoded data for WhatsApp too
+    body_bytes = await request.body()
+    parsed = urllib.parse.parse_qs(body_bytes.decode())
+    from_num = parsed.get('From', [''])[0]
+    text = parsed.get('Body', [''])[0]
+    body = (text or "").strip().lower()
+    parts = body.split(maxsplit=1)
+    command = parts[0] if parts else ""
+    arg = parts[1] if len(parts) > 1 else None
 
-        # Rate limiting check (safe - returns True if Redis fails)
-        try:
-            if not check_rate_limit(from_num, "whatsapp", limit=10, window=300):
-                return "Too many requests. Please wait a few minutes before trying again."
-        except Exception as e:
-            print(f"Rate limit check failed: {e}")
-            # Continue without rate limiting
+    # Rate limiting check
+    if not check_rate_limit(from_num, "whatsapp", limit=10, window=300):  # 10 messages per 5 minutes
+        return "Too many requests. Please wait a few minutes before trying again."
 
-        if command == "join":
-            try:
-                # Check if database is available
-                if os.getenv("DATABASE_AVAILABLE") != "true":
-                    return "Service is temporarily in maintenance mode. Please try again in a few minutes."
-                    
-                conn_local = get_connection()
-                ticket = create_ticket(conn_local, phone=from_num, note=arg, channel="whatsapp")
-                conn_local.close()
-                return f"Your ticket is {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min. Reply STATUS anytime."
-            except Exception as e:
-                print(f"Database error during JOIN: {e}")
-                return "Service temporarily unavailable. Please try again later."
-                
-        elif command == "status":
-            try:
-                # Check if database is available
-                if os.getenv("DATABASE_AVAILABLE") != "true":
-                    return "Service is temporarily in maintenance mode. Please try again in a few minutes."
-                    
-                conn_local = get_connection()
-                ticket = get_ticket_by_phone(conn_local, from_num)
-                conn_local.close()
-                if not ticket:
-                    return "No active ticket. Reply JOIN to enter the queue."
-                return f"Ticket {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min."
-            except Exception as e:
-                print(f"Database error during STATUS: {e}")
-                return "Service temporarily unavailable. Please try again later."
-                
-        elif command == "leave":
-            try:
-                # Check if database is available
-                if os.getenv("DATABASE_AVAILABLE") != "true":
-                    return "Service is temporarily in maintenance mode. Please try again in a few minutes."
-                    
-                conn_local = get_connection()
-                ticket = get_ticket_by_phone(conn_local, from_num)
-                if not ticket:
-                    conn_local.close()
-                    return "No active ticket. Reply JOIN to enter the queue."
-                update_ticket_status(conn_local, ticket['code'], 'canceled')
-                conn_local.close()
-                return f"Ticket {ticket['code']} canceled. Thank you."
-            except Exception as e:
-                print(f"Database error during LEAVE: {e}")
-                return "Service temporarily unavailable. Please try again later."
-                
-        elif command == "help":
-            return (
-                "Commands:\n"
-                "JOIN [note] – join the queue with an optional note (e.g., fever).\n"
-                "STATUS – check your current position and ETA.\n"
-                "LEAVE – cancel your ticket.\n"
-                "HELP – show this message."
-            )
-        else:
-            return "Unknown command. Send HELP for usage."
-            
-    except Exception as e:
-        print(f"WhatsApp webhook global error: {e}")
-        return "Service temporarily unavailable. Please try again later."
+    if command == "join":
+        conn_local = get_connection()
+        ticket = create_ticket(conn_local, phone=from_num, note=arg, channel="whatsapp")
+        conn_local.close()
+        return f"Your ticket is {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min. Reply STATUS anytime."
+    elif command == "status":
+        conn_local = get_connection()
+        ticket = get_ticket_by_phone(conn_local, from_num)
+        conn_local.close()
+        if not ticket:
+            return "No active ticket. Reply JOIN to enter the queue."
+        return f"Ticket {ticket['code']}. Position #{ticket['position']}. ETA {ticket['eta_minutes']} min."
+    elif command == "leave":
+        conn_local = get_connection()
+        ticket = get_ticket_by_phone(conn_local, from_num)
+        if not ticket:
+            conn_local.close()
+            return "No active ticket. Reply JOIN to enter the queue."
+        update_ticket_status(conn_local, ticket['code'], 'canceled')
+        conn_local.close()
+        return f"Ticket {ticket['code']} canceled. Thank you."
+    elif command == "help":
+        return (
+            "Commands:\n"
+            "JOIN [note] – join the queue with an optional note (e.g., fever).\n"
+            "STATUS – check your current position and ETA.\n"
+            "LEAVE – cancel your ticket.\n"
+            "HELP – show this message."
+        )
+    else:
+        return "Unknown command. Send HELP for usage."
 
 
 @app.post("/webhooks/whatsapp/status", response_class=PlainTextResponse)
 async def whatsapp_status(request: Request) -> str:
     """Handle WhatsApp message status callbacks (delivered, read, etc.)"""
     return "OK"
-
-
-@app.get("/debug/railway")
-def debug_railway():
-    """Debug endpoint to check Railway environment and database connection."""
-    import sys
-    debug_info = {
-        "app_status": "running",
-        "python_version": sys.version,
-        "working_directory": os.getcwd(),
-        "port": os.getenv("PORT", "not_set"),
-        "database_available": os.getenv("DATABASE_AVAILABLE", "unknown"),
-        "environment_vars": {
-            "DATABASE_URL": "SET" if os.getenv("DATABASE_URL") else "NOT_SET",
-            "REDIS_URL": "SET" if os.getenv("REDIS_URL") else "NOT_SET",
-        }
-    }
-    
-    # Test database connection
-    try:
-        conn = get_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 as test")
-            result = cur.fetchone()
-        conn.close()
-        debug_info["database_test"] = "SUCCESS"
-        debug_info["database_result"] = str(result)
-    except Exception as e:
-        debug_info["database_test"] = "FAILED"
-        debug_info["database_error"] = str(e)
-    
-    # Test psycopg2
-    try:
-        import psycopg2
-        debug_info["psycopg2"] = "available"
-        debug_info["psycopg2_version"] = psycopg2.__version__
-    except ImportError as e:
-        debug_info["psycopg2"] = "missing"
-        debug_info["psycopg2_error"] = str(e)
-    
-    return debug_info
-
-
-@app.post("/webhooks/whatsapp/test", response_class=PlainTextResponse)
-async def whatsapp_test(request: Request) -> str:
-    """Test WhatsApp webhook without database operations."""
-    try:
-        import urllib.parse
-        
-        body_bytes = await request.body()
-        parsed = urllib.parse.parse_qs(body_bytes.decode('utf-8', errors='ignore'))
-        from_num = parsed.get('From', [''])[0]
-        text = parsed.get('Body', [''])[0]
-        
-        return f"Test successful! From: {from_num}, Text: {text}, DB Available: {os.getenv('DATABASE_AVAILABLE', 'unknown')}"
-        
-    except Exception as e:
-        return f"Test failed: {str(e)}"
 
 
 @app.get("/admin/board")
@@ -279,35 +185,15 @@ def admin_board(passcode: str) -> Dict[str, Any]:
     immediately after reading the board.  This avoids reliance on a global
     connection that may be unavailable in multi‑threaded or test contexts.
     """
-    # Check if database is available
-    if os.getenv("DATABASE_AVAILABLE") != "true":
-        return {
-            "error": "Database unavailable",
-            "message": "System is in maintenance mode",
-            "waiting": [],
-            "recent": [],
-            "stats": {"waiting_count": 0, "avg_wait": 0}
-        }
-    
+    conn_local = get_connection()
     try:
-        conn_local = get_connection()
-        try:
-            settings = get_settings(conn_local)
-            if passcode != settings["admin_passcode"]:
-                raise HTTPException(status_code=401, detail="Invalid passcode")
-            board = get_board(conn_local)
-            return board
-        finally:
-            conn_local.close()
-    except Exception as e:
-        print(f"Admin board database error: {e}")
-        return {
-            "error": "Database error",
-            "message": str(e),
-            "waiting": [],
-            "recent": [],
-            "stats": {"waiting_count": 0, "avg_wait": 0}
-        }
+        settings = get_settings(conn_local)
+        if passcode != settings["admin_passcode"]:
+            raise HTTPException(status_code=401, detail="Invalid passcode")
+        board = get_board(conn_local)
+        return board
+    finally:
+        conn_local.close()
 
 
 @app.post("/admin/action")
@@ -454,78 +340,3 @@ async def admin_events(passcode: str):
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-# Server startup for Railway deployment
-if __name__ == "__main__":
-    import uvicorn
-    import sys
-    import traceback
-    import logging
-    
-    # Configure detailed logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    logger = logging.getLogger(__name__)
-    
-    try:
-        logger.info("🚀 Starting Clinic Queue with PostgreSQL...")
-        logger.info(f"🐍 Python version: {sys.version}")
-        logger.info(f"📁 Working directory: {os.getcwd()}")
-        
-        # Ensure DATABASE_URL is set to Neon database
-        if not os.getenv("DATABASE_URL"):
-            os.environ["DATABASE_URL"] = "postgresql://checking_owner:npg_MdnKY0Gh1amc@ep-super-scene-a51ij7h2-pooler.us-east-2.aws.neon.tech/checking?sslmode=require&channel_binding=require"
-        
-        logger.info(f"🗄️ Using database: {os.getenv('DATABASE_URL')[:50]}...")
-        
-        # Test psycopg2 import
-        try:
-            import psycopg2
-            logger.info("✅ psycopg2 import successful")
-        except ImportError as e:
-            logger.error(f"❌ psycopg2 import failed: {e}")
-            raise
-        
-        # Test database connection
-        logger.info("🔗 Testing database connection...")
-        database_available = False
-        try:
-            conn = get_connection()
-            logger.info("✅ Database connection successful")
-            
-            # Test basic query
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1 as test")
-                result = cur.fetchone()
-                logger.info(f"✅ Database query test: {result}")
-            
-            # Initialize database
-            logger.info("🏗️ Initializing database tables...")
-            init_db(conn)
-            logger.info("✅ Database tables initialized")
-            
-            conn.close()
-            logger.info("✅ Database connection closed")
-            database_available = True
-            
-        except Exception as e:
-            logger.error(f"❌ Database connection failed: {e}")
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            logger.warning("⚠️ Continuing without database - app will run in limited mode")
-            
-        # Set global database availability flag
-        os.environ["DATABASE_AVAILABLE"] = "true" if database_available else "false"
-        logger.info(f"🗄️ Database available: {database_available}")
-        
-        port = int(os.getenv("PORT", 8000))
-        logger.info(f"🌐 Starting uvicorn on port {port}")
-        
-        uvicorn.run(app, host="0.0.0.0", port=port)
-        
-    except Exception as e:
-        logger.error(f"❌ CRITICAL STARTUP ERROR: {e}")
-        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
-        sys.exit(1)
